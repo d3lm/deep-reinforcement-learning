@@ -1,0 +1,12 @@
+# IDEs
+.idea/
+jsconfig.json
+.vscode/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Plots
+plots/**
