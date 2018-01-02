@@ -1,25 +1,43 @@
+import sys
 import numpy as np
 import warnings
 import utils
+from enum import Enum
 from time import time, sleep
 import matplotlib.pyplot as plt
 from policy import EpsGreedyPolicy
 from memory import ExperienceReplay
+from keras.models import Sequential
+from keras.layers import *
+from keras.optimizers import *
+from keras.models import load_model
+
+TEST = 0
+SIMPLE = 1
+DOUBLE = 2
 
 class Agent:
-  def __init__(self, game, model, nb_epoch=10000, memory_size=1000, batch_size=50, nb_frames=4, epsilon=1., discount=.9, learning_rate=.1):
-
-    channels = model.input_shape[1]
-
-    if nb_frames != channels:
-      warnings.warn("Dimension mismatch: Using number of channels for number of frames")
-      nb_frames = channels
+  def __init__(self, game, mode=SIMPLE, nb_epoch=10000, memory_size=1000, batch_size=50, nb_frames=4, epsilon=1., discount=.9, learning_rate=.1, model=None):
 
     self.game = game
-    self.model = model
+    self.mode = mode
+    self.target_model = None
+    self.rows, self.columns = game.field_shape()
     self.nb_epoch = nb_epoch
     self.nb_frames = nb_frames
     self.nb_actions = game.nb_actions()
+
+    if mode == TEST:
+      print('Training Mode: Loading model...')
+      self.model = load_model(model)
+    elif mode == SIMPLE:
+      print('Using Plain DQN: Building model...')
+      self.model = self.build_model()
+    elif mode == DOUBLE:
+      print('Using Double DQN: Building primary and target model...')
+      self.model = self.build_model()
+      self.target_model = self.build_model()
+      self.update_target_model()
 
     # Trades off the importance of sooner versus later rewards.
     # A factor of 0 means it rather prefers immediate rewards
@@ -39,7 +57,7 @@ class Agent:
     # a random action by the probability 'eps'. Without this policy the network
     # is greedy and it will it settles with the first effective strategy it finds.
     # Hence, we introduce certain randomness.
-    # Epislon reaches its minimum at 2/3 of the games
+    # Epislon reaches its minimum at 1/2 of the games
     epsilon_end = self.nb_epoch - (self.nb_epoch / 2)
     self.policy = EpsGreedyPolicy(self.model, epsilon_end, self.nb_actions, epsilon, .1)
 
@@ -47,9 +65,25 @@ class Agent:
     # the training takes extremely long even on a GPU and most
     # importantly the approximation of Q-values using non-linear
     # functions, that is used for our NN, is not very stable.
-    self.memory = ExperienceReplay(self.model, self.nb_actions, memory_size, batch_size, self.discount, self.learning_rate)
+    self.memory = ExperienceReplay(self.model, self.target_model, self.nb_actions, memory_size, batch_size, self.discount, self.learning_rate)
 
     self.frames = None
+
+  def build_model(self):
+    model = Sequential()
+    model.add(Conv2D(32, (2, 2), activation='relu', input_shape=(self.nb_frames, self.rows, self.columns), data_format="channels_first"))
+    model.add(Conv2D(64, (2, 2), activation='relu'))
+    model.add(Conv2D(64, (3, 3), activation='relu'))
+    model.add(Flatten())
+    model.add(Dropout(0.1))
+    model.add(Dense(512, activation='relu'))
+    model.add(Dense(self.nb_actions))
+    model.compile(Adam(), 'MSE')
+
+    return model
+
+  def update_target_model(self):
+    self.target_model.set_weights(self.model.get_weights())
 
   def get_frames(self):
     frame = self.game.get_state()
@@ -85,7 +119,8 @@ class Agent:
     path = './plots/{name}_{size}x{size}_{timestamp}'
     fig.savefig(path.format(size=self.game.grid_size, name=file_name, timestamp=int(time())))
 
-  def train(self, visualize=True):
+  def train(self, update_freq=10):
+    total_steps = 0
     max_steps = self.game.grid_size**2 * 3
     loops = 0
     nb_wins = 0
@@ -119,6 +154,7 @@ class Agent:
 
         cumulative_reward += reward
         steps += 1
+        total_steps += 1
 
         if steps == max_steps and not done:
           loops += 1
@@ -145,6 +181,9 @@ class Agent:
         if done:
           duration = utils.get_time_difference(start_time, time())
 
+        if self.mode == DOUBLE and self.target_model is not None and total_steps % (update_freq) == 0:
+          self.update_target_model()
+
       current_epoch = epoch + 1
       reward_buffer.append([current_epoch, cumulative_reward])
       duration_buffer.append([current_epoch, duration])
@@ -160,8 +199,9 @@ class Agent:
     self.print_stats(steps_buffer, 'Steps per Game')
     self.print_stats(wins_buffer, 'Wins')
 
-    path = './models/model_{size}x{size}_{epochs}_{timestamp}.h5'
-    self.model.save(path.format(size=self.game.grid_size, epochs=self.nb_epoch, timestamp=int(time())))
+    path = './models/model_{mode}_{size}x{size}_{epochs}_{timestamp}.h5'
+    mode = 'dqn' if self.mode == SIMPLE else 'ddqn'
+    self.model.save(path.format(mode=mode, size=self.game.grid_size, epochs=self.nb_epoch, timestamp=int(time())))
 
   def play(self, nb_games=5, interval=.7):
     nb_wins = 0
